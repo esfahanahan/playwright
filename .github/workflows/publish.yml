@@ -1,0 +1,75 @@
+# Builds the Playwright image on a GitHub-hosted runner and pushes it to GHCR.
+# GitLab runners cannot download Chrome for Testing (storage.googleapis.com
+# returns 403), so this publish must stay on ubuntu-24.04, not a self-hosted runner.
+
+name: Publish Playwright image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - Dockerfile
+      - .github/workflows/publish.yml
+  workflow_dispatch:
+
+concurrency:
+  group: publish-playwright-image
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Read versions from the Dockerfile
+        id: ver
+        run: |
+          set -eu
+          node_image=$(sed -n 's/^ARG NODE_IMAGE=//p' Dockerfile)
+          playwright=$(sed -n 's/^ARG PLAYWRIGHT_VERSION=//p' Dockerfile)
+          node_version=$(printf '%s\n' "$node_image" | sed -n 's/^node:\([0-9][0-9.]*\).*/\1/p')
+          if [ -z "$node_version" ] || [ -z "$playwright" ]; then
+            echo "Could not read NODE_IMAGE or PLAYWRIGHT_VERSION from the Dockerfile." >&2
+            exit 1
+          fi
+          echo "node_image=$node_image" >> "$GITHUB_OUTPUT"
+          echo "playwright=$playwright" >> "$GITHUB_OUTPUT"
+          echo "tag=${playwright}-node${node_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            NODE_IMAGE=${{ steps.ver.outputs.node_image }}
+            PLAYWRIGHT_VERSION=${{ steps.ver.outputs.playwright }}
+          tags: |
+            ghcr.io/esfahanahan/playwright:${{ steps.ver.outputs.tag }}
+            ghcr.io/esfahanahan/playwright:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/esfahanahan/playwright
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
